@@ -1,7 +1,7 @@
 # Copyright 2018-2021 Carnegie Mellon University
 
-from pyactup import *
-import pyactup
+from pyactup.pyactup import *
+from pyactup import pyactup
 
 import math
 import numpy as np
@@ -9,7 +9,7 @@ import pytest
 import sys
 
 from math import isclose
-from pprint import pprint
+
 
 def test_parameter_manipulation():
     m = Memory()
@@ -79,6 +79,7 @@ def test_parameter_manipulation():
     with pytest.raises(RuntimeError):
         m = Memory(decay=5, optimized_learning=True)
     m = Memory(noise=0, temperature=0.8)
+
 
 def test_time():
     m = Memory()

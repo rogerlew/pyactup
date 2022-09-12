@@ -37,7 +37,10 @@ may be strictly algorithmic, may interact with human subjects, or may be embedde
 sites.
 """
 
-__version__ = "1.1.4"
+__version__ = "1.1.4r"
+
+from collections.abc import Iterable
+from typing import Union, Optional
 
 if "dev" in __version__:
     print("PyACTUp version", __version__)
@@ -51,16 +54,23 @@ import operator
 import pylru
 import random
 import sys
+from array import array
 
 from contextlib import contextmanager
 from numbers import Number
 from prettytable import PrettyTable
 from warnings import warn
 
+from .fatigue import (
+    fatigue_param, utility, fatigue_thresh, utility_threshold
+)
+
+
 __all__ = ("Memory", "set_similarity_function", "use_actr_similarity")
 
 DEFAULT_NOISE = 0.25
 DEFAULT_DECAY = 0.5
+DEFAULT_STRESS = 0.1
 DEFAULT_THRESHOLD = -10.0
 DEFAULT_LEARNING_TIME_INCREMENT = 1
 DEFAULT_RETRIEVAL_TIME_INCREMENT = 0
@@ -71,6 +81,7 @@ LN_CACHE_SIZE = 1000
 SIMILARITY_CACHE_SIZE = 10_000
 NOISE_VALUES_SIZE = 1000
 MAXIMUM_RANDOM_SEED = 2**62
+
 
 class Memory(dict):
     """A cognitive entity containing a collection of learned things, its chunks.
@@ -99,25 +110,22 @@ class Memory(dict):
     def __init__(self,
                  noise=DEFAULT_NOISE,
                  decay=DEFAULT_DECAY,
+                 stress=DEFAULT_STRESS,
                  temperature=None,
                  threshold=DEFAULT_THRESHOLD,
                  mismatch=None,
                  learning_time_increment=DEFAULT_LEARNING_TIME_INCREMENT,
                  retrieval_time_increment=DEFAULT_RETRIEVAL_TIME_INCREMENT,
                  optimized_learning=False):
-        self._temperature_param = 1 # will be reset below, but is needed for noise assignment
+        self._temperature_param = 1  # will be reset below, but is needed for noise assignment
         self._activation_noise_cache = None
         self._activation_noise_cache_time = None
         self._noise = None
-        self._decay = None
         self.noise = noise
         self._optimized_learning = False
+
         self.decay = decay
-        if temperature is None and not self._validate_temperature(None, noise):
-            warn(f"A noise of {noise} and temperature of None will make the temperature too low; setting temperature to 1")
-            self.temperature = 1
-        else:
-            self.temperature = temperature
+        self.stress = stress
         self.threshold = threshold
         self.mismatch = mismatch
         self._learning_time_increment = learning_time_increment
@@ -129,13 +137,13 @@ class Memory(dict):
         self._next_noise_value = NOISE_VALUES_SIZE
         self.reset(optimized_learning=bool(optimized_learning))
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<Memory {dict(self.items())}>"
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"<Memory {id(self)}>"
 
-    def reset(self, preserve_prepopulated=False, optimized_learning=None):
+    def reset(self, preserve_prepopulated=False, optimized_learning=None) -> None:
         """Deletes the Memory's chunks and resets its time to zero.
         If *preserve_prepopulated* is false it deletes all chunks; if it is true it
         deletes all chunk references later than time zero, completely deleting those
@@ -155,14 +163,14 @@ class Memory(dict):
             self._optimized_learning = bool(optimized_learning)
         if preserve_prepopulated:
             for k, v in preserved.items():
-                v._references = np.empty(1, dtype=int) if self._optimized_learning else np.array([0])
+                v._references = array('l', [-1]) if self._optimized_learning else array('l', [0])
                 v._reference_count = 1
                 v._base_activation_time = None
                 v._base_activation = None
                 self[k] = v
         self._clear_noise_cache()
 
-    def _clear_noise_cache(self):
+    def _clear_noise_cache(self) -> str:
         if self._activation_noise_cache is not None:
             self._activation_noise_cache.clear()
             self._activation_noise_cache_time = self._time
@@ -234,17 +242,19 @@ class Memory(dict):
             self._activation_noise_cache_time = None
 
     @property
-    def time(self):
+    def time(self) -> float:
         """This Memory's current time.
         Time in PyACTUp is a dimensionless quantity, the interpretation of which is at the
         discretion of the modeler.
         """
         return self._time
 
-    def advance(self, amount=1):
+    def advance(self, amount=None) -> float:
         """Adds the given *amount* to this Memory's time, and returns the new, current time.
         Raises a :exc:`ValueError` if *amount* is negative, or not a real number.
         """
+        if amount is None:
+            amount = self.learning_time_increment
         if amount < 0:
             raise ValueError(f"Time cannot be advanced backward ({amount})")
         if amount:
@@ -299,7 +309,7 @@ class Memory(dict):
         return self._learning_time_increment
 
     @learning_time_increment.setter
-    def learning_time_increment(self, value):
+    def learning_time_increment(self, value: Union[float, None]) -> None:
         if value is None:
             value = 0
         if value < 0:
@@ -314,7 +324,7 @@ class Memory(dict):
         return self._retrieval_time_increment
 
     @retrieval_time_increment.setter
-    def retrieval_time_increment(self, value):
+    def retrieval_time_increment(self, value: Union[float, None]) -> None:
         if value is None:
             value = 0
         if value < 0:
@@ -322,7 +332,7 @@ class Memory(dict):
         self._retrieval_time_increment = value
 
     @property
-    def noise(self):
+    def noise(self) -> Union[float, None]:
         """The amount of noise to add during chunk activation computation.
         This is typically a positive, floating point, number between about 0.1 and 1.5.
         It defaults to 0.25.
@@ -334,22 +344,15 @@ class Memory(dict):
         return self._noise
 
     @noise.setter
-    def noise(self, value):
+    def noise(self, value: Union[float, None]) -> None:
         if value < 0:
             raise ValueError(f"The noise, {value}, must not be negative")
-        if self._temperature_param is None:
-            t = Memory._validate_temperature(None, value)
-            if not t:
-                warn(f"Setting noise to {value} will make the temperature too low; setting temperature to 1")
-                self.temperature = 1
-            else:
-                self._temperature = t
         if value != self._noise:
             self._noise = value
             self._clear_noise_cache()
 
     @property
-    def decay(self):
+    def decay(self) -> Union[float, None]:
         """Controls the rate at which activation for previously chunks in memory decay with the passage of time.
         Time in this sense is dimensionless.
         The :attr:`decay` is typically between about 0.1 and 2.0.
@@ -362,15 +365,32 @@ class Memory(dict):
         """
         return self._decay
 
+    @property
+    def stress(self) -> Union[float, None]:
+        """TODO:
+        """
+        return self._stress
+
+    @stress.setter
+    def stress(self, value: Union[float, None]) -> None:
+        if value is not None:
+            if value < 0:
+                raise ValueError(f"The stress, {value}, must not be negative")
+
+        self._stress = value
+        self._ln_cache = [None]*LN_CACHE_SIZE
+        for c in self.values():
+            c._clear_base_activation()
+
     @decay.setter
-    def decay(self, value):
+    def decay(self, value: Union[float, None]) -> None:
         if value is not None:
             if value < 0:
                 raise ValueError(f"The decay, {value}, must not be negative")
             if value < 1:
                 self._ln_1_mius_d = math.log(1 - value)
             elif self._optimized_learning:
-                self._ln_1_mius_d = "illegal value" # ensure error it attempt to use this
+                self._ln_1_mius_d = "illegal value"  # ensure error it attempt to use this
                 raise ValueError(f"The decay, {value}, must be less than one if optimized_learning is True")
         self._ln_cache = [None]*LN_CACHE_SIZE
         self._decay = value
@@ -378,36 +398,17 @@ class Memory(dict):
             c._clear_base_activation()
 
     @property
-    def temperature(self):
+    def temperature(self) -> Union[float, None]:
         """The temperature parameter used for blending values.
         If ``None``, the default, the square root of 2 times the value of
         :attr:`noise` will be used. If the temperature is too close to zero, which
         can also happen if it is ``None`` and the :attr:`noise` is too low, or negative, a
         :exc:`ValueError` is raised.
         """
-        return self._temperature_param
-
-    _SQRT_2 = math.sqrt(2)
-
-    @temperature.setter
-    def temperature(self, value):
-        if value is None or value is False:
-            value = None
-        else:
-            value = float(value)
-        t = Memory._validate_temperature(value, self._noise)
-        if not t:
-            if value is None:
-                raise ValueError(f"The noise, {self._noise}, is too low to for the temperature to be set to None.")
-            else:
-                raise ValueError(f"The temperature, {value}, must not be less than {MINIMUM_TEMPERATURE}.")
-        self._temperature_param = value
-        self._temperature = t
-
-    @staticmethod
-    def _validate_temperature(temperature, noise):
-        if temperature is not None:
-            t = temperature
+        temperature_param = self._temperature_param
+        noise = self.noise
+        if temperature_param is not None:
+            t = temperature_param
         else:
             t = Memory._SQRT_2 * noise
         if t < MINIMUM_TEMPERATURE:
@@ -415,8 +416,18 @@ class Memory(dict):
         else:
             return t
 
+    _SQRT_2 = math.sqrt(2)
+
     @property
-    def threshold(self):
+    def temperature_param(self) -> Union[float, None]:
+        return self._temperature_param
+
+    @temperature_param.setter
+    def temperature_param(self, value: Union[float, None]) -> Union[float, None]:
+        self._temperature_param = value
+
+    @property
+    def threshold(self) -> Union[float, None]:
         """The minimum activation value required for a retrieval.
         If ``None`` there is no minimum activation required.
         The default value is ``-10``.
@@ -428,20 +439,14 @@ class Memory(dict):
         ratios of various times, the attr:`threshold` is sensitive to the actual
         magnitude. Suitable care should be exercised when adjusting it.
         """
-        if self._threshold == -sys.float_info.max:
-            return None
-        else:
-            return self._threshold
+        return self._threshold
 
     @threshold.setter
-    def threshold(self, value):
-        if value is None or value is False:
-            self._threshold = -sys.float_info.max
-        else:
-            self._threshold = float(value)
+    def threshold(self, value: Union[float, None]):
+        self._threshold = value
 
     @property
-    def mismatch(self):
+    def mismatch(self) -> Union[float, None]:
         """The mismatch penalty applied to partially matching values when computing activations.
         If ``None`` no partial matching is done.
         Otherwise any defined similarity functions (see :func:`set_similarity_function`)
@@ -459,16 +464,16 @@ class Memory(dict):
         return self._mismatch
 
     @mismatch.setter
-    def mismatch(self, value):
-        if value is None or value is False:
+    def mismatch(self, value: Union[float, None]) -> Union[float, None]:
+        if value is None:
             self._mismatch = None
         elif value < 0:
             raise ValueError(f"The mismatch penalty, {value}, must not be negative")
         else:
-            self._mismatch = float(value)
+            self._mismatch = value
 
     @property
-    def activation_history(self):
+    def activation_history(self) -> Union[Iterable, None]:
         """A :class:`MutableSequence`, typically a :class:`list`,  into which details of the computations underlying PyACTUp operation are appended.
         If ``None``, the default, no such details are collected.
         In addition to activation computations, the resulting retrieval probabilities are
@@ -514,8 +519,8 @@ class Memory(dict):
         return self._activation_history
 
     @activation_history.setter
-    def activation_history(self, value):
-        if value is None or value is False:
+    def activation_history(self, value: Union[Iterable, None]):
+        if value is None:
             self._activation_history = None
         elif isinstance(value, abc.MutableSequence):
             self._activation_history = value
@@ -659,22 +664,9 @@ class Memory(dict):
             chunk = Chunk(self, kwargs)
             self[signature] = chunk
             created = True
-        self._cite(chunk)
-        self._advance(advance, self._learning_time_increment)
+        chunk.cite()
+        self.advance(advance if advance is not None else self._learning_time_increment)
         return created
-
-    def _advance(self, argument, default):
-        old = self._time
-        self.advance(argument if argument is not None else default)
-        return old
-
-    def _cite(self, chunk):
-        if not self._optimized_learning:
-            if chunk._reference_count >= chunk._references.size:
-                chunk._references.resize(2 * chunk._references.size, refcheck=False)
-            chunk._references[chunk._reference_count] = self._time
-        chunk._reference_count += 1
-        chunk._base_activation_time = None
 
     def forget(self, when, **kwargs):
         """Undoes the operation of a previous call to :meth:`learn`.
@@ -683,7 +675,7 @@ class Memory(dict):
             Normally this method should not be used. It does not correspond to a
             biologically plausible process, and is only provided for esoteric purposes.
 
-        The *kwargs* should be those supplied fro the :meth:`learn` operation to be
+        The *kwargs* should be those supplied from the :meth:`learn` operation to be
         undone, and *when* should be the time that was current when the operation was
         performed. Returns ``True`` if it successfully undoes such an operation, and
         ``False`` otherwise.
@@ -694,20 +686,11 @@ class Memory(dict):
         chunk = self.get(signature)
         if not chunk:
             return False
-        if not self._optimized_learning:
-            try:
-                i = np.where(chunk._references == when)[0][0]
-            except IndexError:
-                return False
-            if i < chunk._reference_count:
-                chunk._references[i:chunk._reference_count-1] = chunk._references[i+1:chunk._reference_count]
-        elif when < chunk._creation:
-            return False
-        elif when == chunk._creation and chunk._reference_count > 1:
-            raise RuntimeError("Can't meaningfully forget a chunk at its creation time with optimized learning")
-        chunk._reference_count -= 1
-        if not chunk._reference_count:
+
+        chunk.forgetWhen(when)
+        if not chunk.reference_count:
             del self[signature]
+
         return True
 
     def retrieve(self, partial=False, rehearse=False, advance=None, **kwargs):
@@ -738,18 +721,11 @@ class Memory(dict):
         >>> m.retrieve(color="blue")["widget"]
         'snackleizer'
         """
-        old = self._advance(advance, self._retrieval_time_increment)
-        try:
-            result = self._partial_match(kwargs) if partial else self._exact_match(kwargs)
-            if rehearse and result:
-                self._cite(result)
-            old = None
-            return result
-        finally:
-            if old is not None:
-                # Don't advance if there's an error or for some other reason we don't
-                # finish normally; note that the noise cache is still cleared, though.
-                self._time = old
+        result = self._partial_match(kwargs) if partial else self._exact_match(kwargs)
+        if rehearse and result:
+            result.cite()
+        self.advance(advance if advance is not None else self._retrieval_time_increment)
+        return result
 
     def _exact_match(self, conditions):
         # Returns a single chunk matching the given slots and values, that has the
@@ -760,6 +736,7 @@ class Memory(dict):
         for chunk in self.values():
             if not conditions.keys() <= chunk.keys():
                 continue
+
             for key, value in conditions.items():
                 if chunk[key] != value:
                     break
@@ -799,8 +776,8 @@ class Memory(dict):
 
         def __next__(self):
             while True:
-                chunk = self._chunks.__next__()             # pass on up the Stop Iteration
-                if self._conditions.keys() <= chunk.keys(): # subset
+                chunk = self._chunks.__next__()              # pass on up the Stop Iteration
+                if self._conditions.keys() <= chunk.keys():  # subset
                     if self._memory._mismatch is None:
                         exact = self._conditions.keys()
                         partial = []
@@ -829,9 +806,8 @@ class Memory(dict):
                         history["activation"] = total
                     return (chunk, total)
 
-
     def _activations(self, conditions):
-         return self._Activations(self, conditions)
+        return self._Activations(self, conditions)
 
     def _partial_match(self, conditions):
         best_chunks = []
@@ -866,7 +842,8 @@ class Memory(dict):
         >>> m.blend("size", color="red")
         1.1548387620911693
         """
-        old = self._advance(advance, self._retrieval_time_increment)
+        old = self._time
+        self.advance(advance if advance is not None else self._retrieval_time_increment)
         try:
             weights = 0.0
             weighted_outcomes = 0.0
@@ -875,7 +852,7 @@ class Memory(dict):
             for chunk, activation in self._activations(kwargs):
                 if outcome_attribute not in chunk:
                     continue
-                weight = math.exp(activation / self._temperature)
+                weight = math.exp(activation / self.temperature)
                 if self._activation_history is not None:
                     chunk_weights.append((self._activation_history[-1], weight))
                 weights += weight
@@ -942,7 +919,8 @@ class Memory(dict):
 
         """
         comparator = operator.gt if not minimize else operator.lt
-        old = self._advance(advance, self._retrieval_time_increment)
+        old = self._time
+        self.advance(advance if advance is not None else self._retrieval_time_increment)
         try:
             best_value = -math.inf if not minimize else math.inf
             best_args = []
@@ -1040,7 +1018,7 @@ class Chunk(dict):
         self._memory = memory
         self.update(content)
         self._creation = memory._time
-        self._references = np.empty(1, dtype=int)
+        self._references = array('l', [])
         self._reference_count = 0
         self._base_activation_time = None
         self._base_activation = None
@@ -1050,6 +1028,10 @@ class Chunk(dict):
 
     def __str__(self):
         return self._name
+
+    @property
+    def reference_count(self):
+        return self._reference_count
 
     @property
     def references(self):
@@ -1062,7 +1044,7 @@ class Chunk(dict):
         if self._memory._optimized_learning:
             return self._reference_count
         else:
-            return list(self._references[:self._reference_count])
+            return self._references
 
     def _activation(self, for_partial=False):
         # Does not include the mismatch penalty component, that's handled by the caller.
@@ -1075,7 +1057,7 @@ class Chunk(dict):
                        "attributes": tuple(self.items()),
                        "references": (self._reference_count
                                       if self._memory.optimized_learning
-                                      else tuple(self._references[:self._reference_count])),
+                                      else self._references),
                        "base_activation": base,
                        "activation_noise": noise}
             if not for_partial:
@@ -1097,36 +1079,49 @@ class Chunk(dict):
 
     def _get_base_activation(self):
         if self._base_activation_time != self._memory.time:
-            err = None
             if self._memory._optimized_learning:
-                try:
-                    self._base_activation = (self._cached_ln(self._reference_count)
-                                             - self._memory._ln_1_mius_d
-                                             - self._memory._decay * self._cached_ln(self._memory._time - self._creation))
-                except ValueError as e:
-                    err = e
+                self._base_activation = self._cached_ln(self._reference_count)
+                self._base_activation -= self._memory._ln_1_mius_d
+                self._base_activation -= self._memory.decay * self._cached_ln(self._memory.time - self._creation)
+
+                # more activation for more recently activated chunks
+                stress = self._memory.stress
+                if stress is not None:
+                    self._base_activation += (1.0 / stress) * self._cached_ln(self._memory.time - self._references[-1])
             else:
-                base = np.sum((self._memory._time - self._references[0:self._reference_count])
-                              ** -self._memory._decay)
+                base = np.sum((self._memory.time - np.frombuffer(self._references, dtype=np.int32))
+                              ** -self._memory.decay)
                 if np.isfinite(base):
                     self._base_activation = math.log(base)
                 else:
-                    err = RuntimeError(f"Non-finite value {base} encounterd when computing base activation")
-            if err:
-                if self._memory._time <= self._creation:
-                    raise RuntimeError("Can't compute activation of a chunk at or before the time it was created")
-                elif (not self._memory._optimized_learning
-                      and self._references[-1] >= self._memory._time):
-                    raise RuntimeError("Can't compute activation of a chunk at or before the time of its most recent reference")
-                else:
-                    raise err
+                    raise RuntimeError(f"Non-finite value {base} encounterd when computing base activation")
             self._base_activation_time = self._memory.time
         return self._base_activation
 
     def _clear_base_activation(self):
         self._base_activation_time = None
 
+    def cite(self):
+        if not self._memory._optimized_learning:
+            self._references.append(self._memory._time)
+        self._reference_count += 1
+        self._base_activation_time = None
 
+    def forgetWhen(self, when):
+
+        if not self._memory._optimized_learning:
+            try:
+                i = np.where(self._references == when)[0][0]
+            except IndexError:
+                return False
+            if i < self._reference_count:
+                self._references.pop(i)
+        elif when < self._creation:
+            return False
+        elif when == self._creation and self._reference_count > 1:
+            raise RuntimeError("Can't meaningfully forget a chunk at its creation time with optimized learning")
+        self._reference_count -= 1
+        return True
 
 # Local variables:
 # fill-column: 90
