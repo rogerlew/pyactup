@@ -1,13 +1,12 @@
 import random
-from itertools import count
 
 
 def fatigue_param(microlapses: int, time: float, fp_dcc=0.98):
     """
-    calculates and returns the fatigue module's modulation value (eq. 2)
+    calculates and returns the fatigue modulation value at time t (eq. 2)
 
-    :param time: microlapses count >= 0
-    :type time: int
+    :param microlapses: microlapses count >= 0
+    :type microlapses: int
     :param time: time in minutes
     :type time: float
     :param fp_dcc: degradation value
@@ -18,12 +17,12 @@ def fatigue_param(microlapses: int, time: float, fp_dcc=0.98):
     return fp_pct * (1.0 + time) ** random.uniform(-1, 0)
 
 
-def utility(microlapses, time, ui_t=5, noise_sigma=0.2):
+def utility(microlapses: int, time: float, ui_t=5, noise_sigma=0.2):
     """
-    calculates and returns the fatigue module's modulation value (eq. 1)
+    calculates utility as modified by the fatigue mechanism at time t (eq. 1)
 
-    :param time: microlapses count >= 0
-    :type time: int
+    :param microlapses: microlapses count >= 0
+    :type microlapses: int
     :param time: time [0.0, 1.0]
     :type time: float
     :param ui_t: initial utility at time
@@ -38,7 +37,7 @@ def utility(microlapses, time, ui_t=5, noise_sigma=0.2):
 
 def fatigue_thresh(time: float, ut_tot=-0.16):
     """
-    calculates and returns the fatigue module's modulation value (eq. 5)
+    calculates and returns the fatigue threshold value at time t (eq. 5)
 
     :param time: time [0.0, 1.0]
     :type time: float
@@ -49,7 +48,7 @@ def fatigue_thresh(time: float, ut_tot=-0.16):
     return (1.0 + time) ** ut_tot
 
 
-def utility_threshold(microlapses, time, ut_0=3.6, ut_tot=-0.16):
+def utility_threshold(time: float, ut_0=3.6, ut_tot=-0.16):
     """
     calculates and returns the utility threshold (used to represent increased effort)
     as compensation for feeling tired (eq. 4)
@@ -72,32 +71,35 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     import numpy as np
 
-    microlapses = 0
-    x = np.linspace(0, 60, 1000)
-    y = np.zeros(1000)
-    z = np.zeros(1000)
-    err = np.zeros(1000)
-    for i, t in enumerate(x):
-        microlapses += random.uniform(0, 1) > 0.98
-        y[i] = utility(microlapses, t)
-        z[i] = utility_threshold(microlapses, t, ut_0=4, ut_tot=-0.8)
-        err[i] = y[i] < z[i]
+    for _ut_0, _ut_tot in [(4, -1.0), (4, -0.8), (4, -0.4), (4, 0.0)]:
 
-    plt.plot(x, y, label='utility(t)')
-    plt.plot(x, z, label='utility_threshold(t)')
-    plt.xlabel('time')
-    plt.legend()
-    plt.savefig('validation_plots/utility.png')
-    plt.show()
+        _microlapses = 0
+        x = np.linspace(0, 60, 1000)
+        y = np.zeros(1000)
+        z = np.zeros(1000)
+        err = np.zeros(1000)
+        for i, t in enumerate(x):
+            _microlapses += random.uniform(0, 1) > 0.98
+            y[i] = utility(_microlapses, t)
+            z[i] = utility_threshold(t, ut_0=_ut_0, ut_tot=_ut_tot)
+            err[i] = y[i] < z[i]
 
-    plt.hist(y)
-    plt.title('hist(utility(t))')
-    plt.savefig('validation_plots/hist(utility(t)).png')
-    plt.show()
+        plt.plot(x, y, label='utility(t)')
+        plt.plot(x, z, label='utility_threshold(t)')
+        plt.xlabel('time')
+        plt.title(f'ut_0={_ut_0}, ut_tot={_ut_tot}')
+        plt.legend()
+        plt.savefig(f'validation_plots/utility(ut_0={_ut_0},ut_tot={_ut_tot}).png')
+        plt.show()
 
-    plt.plot(x, np.cumsum(err))
-    plt.title('cumulative errors over time')
-    plt.xlabel('time')
-    plt.savefig('validation_plots/cumulative_errors.png')
-    plt.show()
+        plt.hist(y)
+        plt.title('hist(utility(t))')
+        plt.savefig(f'validation_plots/hist(utility(t,ut_0={_ut_0},ut_tot={_ut_tot}).png')
+        plt.show()
+
+        plt.plot(x, np.cumsum(err))
+        plt.title('cumulative errors over time')
+        plt.xlabel('time')
+        plt.savefig(f'validation_plots/cumulative_errors(ut_0={_ut_0},ut_tot={_ut_tot}).png')
+        plt.show()
 
